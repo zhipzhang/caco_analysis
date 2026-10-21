@@ -32,9 +32,23 @@ Row = tuple[datetime.datetime, Any]
 
 
 def parse_time(t: TimeLike) -> datetime.datetime | None:
-    """Normalize a time input: ISO strings become ``datetime``, None stays None."""
+    """Normalize a time input: strings become ``datetime``, None stays None.
+
+    Accepts ISO 8601 strings; fields do not need to be zero-padded.
+
+    Examples
+    --------
+    >>> parse_time("2026-10-11T18:00:00")
+    datetime.datetime(2026, 10, 11, 18, 0)
+    >>> parse_time("2026-8-1T08:05:09")  # unpadded fields work too
+    datetime.datetime(2026, 8, 1, 8, 5, 9)
+    >>> parse_time("2026-10-11")
+    datetime.datetime(2026, 10, 11, 0, 0)
+    >>> parse_time(None) is None
+    True
+    """
     if isinstance(t, str):
-        return datetime.datetime.fromisoformat(t)
+        return pd.Timestamp(t).to_pydatetime()
     return t
 
 

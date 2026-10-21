@@ -373,10 +373,17 @@ class ShutterStatus:
         Returns
         -------
         pandas.DataFrame
-            Columns ``timestamp``, ``kind``, ``detail``. Possible kinds:
-            ``unknown_value``, ``repeated_value``, ``invalid_transition``,
-            ``bounce_back``, ``incomplete_start``, ``stuck_in_transit``,
-            ``long_transit``.
+            One row per violation, sorted by ``start_time``. Columns:
+
+            - ``kind`` -- ``unknown_value``, ``repeated_value``,
+              ``invalid_transition``, ``bounce_back``,
+              ``incomplete_start``, ``stuck_in_transit``, ``long_transit``
+            - ``start_time`` / ``end_time`` / ``duration`` -- the time
+              span of the offending step or movement
+            - ``transit_duration`` -- physical moving time (movement
+              anomalies only, else None)
+            - ``states`` -- the state sequence involved, e.g.
+              ``['OPEN', 'TRANSIT', 'OPEN']`` for a bounce-back
 
         Examples
         --------
@@ -386,8 +393,11 @@ class ShutterStatus:
         ...                                  "2026-10-11 18:02"]),
         ...     "value": [0, 0, 1],  # repeat, then CLOSED -> OPEN directly
         ... })
-        >>> list(ShutterStatus(df).anomalies()["kind"])
+        >>> a = ShutterStatus(df).anomalies()
+        >>> list(a["kind"])
         ['repeated_value', 'invalid_transition']
+        >>> a.loc[0, "states"], a.loc[0, "duration"]
+        (['CLOSED', 'CLOSED'], Timedelta('0 days 00:01:00'))
         """
         checks = [
             self._check_unknown_values(),
@@ -396,16 +406,19 @@ class ShutterStatus:
             self._check_movements(max_transit_duration),
         ]
         rows = [row for check in checks for row in check]
-        out = pd.DataFrame(rows, columns=["timestamp", "kind", "detail"])
+        columns = ["kind", "start_time", "end_time", "duration",
+                   "transit_duration", "states"]
+        out = pd.DataFrame(rows, columns=columns)
         if not out.empty:
-            out.sort_values("timestamp", inplace=True)
+            out.sort_values("start_time", inplace=True)
             out.reset_index(drop=True, inplace=True)
         return out
 
     def _check_unknown_values(self) -> list[dict]:
         """Rule: every value must be a valid ShutterState (0/1/2)."""
         return [
-            {"timestamp": ts, "kind": "unknown_value", "detail": f"value={value!r}"}
+            {"kind": "unknown_value", "start_time": ts, "end_time": ts,
+             "duration": None, "transit_duration": None, "states": [value]}
             for ts, value, state in zip(self.df["timestamp"], self.df["value"], self.states)
             if state is None
         ]
@@ -419,8 +432,9 @@ class ShutterStatus:
         states = self.states
         ts = self.df["timestamp"]
         return [
-            {"timestamp": ts[i], "kind": "repeated_value",
-             "detail": f"{states[i].name} recorded again"}
+            {"kind": "repeated_value", "start_time": ts[i - 1], "end_time": ts[i],
+             "duration": ts[i] - ts[i - 1], "transit_duration": None,
+             "states": [states[i].name, states[i].name]}
             for i in range(1, len(states))
             if states[i] is not None and states[i] == states[i - 1]
         ]
@@ -439,8 +453,11 @@ class ShutterStatus:
             if a is None or b is None or a == b:
                 continue  # unknown values / repeats have their own checks
             if b not in EXPECTED_TRANSITIONS[a]:
-                rows.append({"timestamp": ts[i], "kind": "invalid_transition",
-                             "detail": f"{a.name} -> {b.name}"})
+                rows.append({"kind": "invalid_transition",
+                             "start_time": ts[i - 1], "end_time": ts[i],
+                             "duration": ts[i] - ts[i - 1],
+                             "transit_duration": None,
+                             "states": [a.name, b.name]})
         return rows
 
     def _check_movements(self, max_transit_duration) -> list[dict]:
@@ -451,16 +468,18 @@ class ShutterStatus:
         """
         rows = []
         for m in self.movements():
-            detail = " -> ".join(s.name if s is not None else "?" for s in m.states)
+            names = [s.name if s is not None else "?" for s in m.states]
+            row = {"start_time": m.start_time, "end_time": m.end_time,
+                   "duration": m.duration, "transit_duration": m.transit_duration,
+                   "states": names}
             if m.kind in ("bounce_back", "incomplete_start", "stuck_in_transit"):
-                rows.append({"timestamp": m.start_time, "kind": m.kind, "detail": detail})
+                rows.append({"kind": m.kind, **row})
             elif (
                 max_transit_duration is not None
                 and m.transit_duration is not None
                 and m.transit_duration > max_transit_duration
             ):
-                rows.append({"timestamp": m.start_time, "kind": "long_transit",
-                             "detail": f"{detail} took {m.transit_duration}"})
+                rows.append({"kind": "long_transit", **row})
         return rows
 
     # ------------------------------------------------------------------
